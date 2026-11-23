@@ -1,0 +1,29 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: build/Dockerfile
+    image: egt309_image:latest
+    container_name: egt309_container
+    
+    # Mount project root so local code updates immediately sync into the container
+    volumes:
+      - .:/app
+
+    # Keep container open for interactive shells or scripts
+    stdin_open: true
+    tty: true
+
+    # Default command when running container
+    command: bash
+
+    # Uncomment and configure ports as needed in future updates:
+    # ports:
+    #   - "8888:8888" # Jupyter Notebook / Lab
+    #   - "8000:8000" # FastAPI / Flask web API
+
+    # Uncomment to pass environment variables or an .env file:
+    # env_file:
+    #   - .env
+    # environment:
+    #   - PYTHONUNBUFFERED=1
