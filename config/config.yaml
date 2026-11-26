@@ -53,3 +53,20 @@ features:
   thresholds:
     temperature: 90                          # degrees C
     vibration: 80                            # mm/s (absolute value)
+
+# -----------------------------------------------------------------------------
+# preprocessing: cleaning, splitting, imputation, encoding, and scaling
+# -----------------------------------------------------------------------------
+preprocessing:
+  drop_leakage: true                         # drop features.exclude_leakage columns
+  fix_negative_vibration: true               # convert sign-flipped vibration to abs()
+  drop_duplicates: true                      # remove exact duplicate rows
+  id_column: machine_id                      # treated as categorical, never scaled
+  split:
+    strategy: stratified                     # "stratified" or "time"
+    test_size: 0.2                           # fraction reserved for test set
+    random_state: 42                         # seed for reproducible stratified splits
+  imputer_strategy: median                   # "mean", "median", or "most_frequent"
+  add_missing_indicator: false               # add binary missingness indicator columns
+  scaler: standard                           # "standard", "robust", or "none"
+  encode_machine_id: false                   # true = one-hot encode machine_id; false = drop it
