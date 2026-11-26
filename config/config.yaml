@@ -1,1 +1,55 @@
-# Placeholder: pipeline configuration (to be filled in)
+# =============================================================================
+# Pipeline configuration
+# Change values here to experiment; no code edits needed.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# data: where the data comes from and how it is stored (used by data_loader.py)
+# -----------------------------------------------------------------------------
+data:
+  csv_path: data/proj_machine_readings.csv   # raw source file
+  db_path: data/machine_readings.db          # SQLite database built from the CSV
+  table_name: machine_readings               # table that holds the readings
+  csv_chunksize: 20000                       # rows per insert when building the DB
+  timestamp_column: timestamp                # parsed as datetime when loading
+
+  # The loader stops with a clear error if any of these are missing from the
+  # dataset (e.g. a column was renamed or removed). Extra columns are fine.
+  required_columns:
+    - timestamp
+    - machine_id
+    - temperature
+    - vibration
+    - maintenance_required
+
+# -----------------------------------------------------------------------------
+# features: which columns the models use
+# NOTE: draft values taken from the EDA (eda.ipynb). The group should confirm
+# these before the cleaning and modelling code starts reading them.
+# -----------------------------------------------------------------------------
+features:
+  target: maintenance_required               # what we predict (0 = no, 1 = yes)
+
+  # Raw sensor readings. Humidity, pressure and energy_consumption showed no
+  # link to the target in the EDA; remove them here to test dropping them.
+  sensors:
+    - temperature
+    - vibration
+    - humidity
+    - pressure
+    - energy_consumption
+
+  # Derived columns that leak the answer (EDA Step 8), so they are never used
+  # as model inputs.
+  exclude_leakage:
+    - failure_type
+    - machine_status
+    - anomaly_flag
+    - predicted_remaining_life
+    - downtime_risk
+
+  # Cut-offs found in the EDA (Step 7): at or above these values every row
+  # needed maintenance. Used to build the threshold features for linear models.
+  thresholds:
+    temperature: 90                          # degrees C
+    vibration: 80                            # mm/s (absolute value)
