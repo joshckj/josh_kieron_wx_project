@@ -202,32 +202,3 @@ class DataLoader:
             df[self.timestamp_column] = pd.to_datetime(df[self.timestamp_column])
         logger.info("Loaded %d rows, %d columns.", *df.shape)
         return df
-
-    @staticmethod
-    def select_columns(df: pd.DataFrame, keep: List[str]) -> pd.DataFrame:
-        """Keep only the chosen columns (works on a DataFrame, not on SQLite).
-
-        Run this after feature engineering so engineered columns can be kept.
-        Column order of ``df`` is preserved. Names in ``keep`` that are not in
-        ``df`` are skipped with a warning.
-
-        Args:
-            df: DataFrame to narrow down.
-            keep: Column names to keep.
-
-        Raises:
-            ValueError: If none of the columns in ``keep`` exist in ``df``.
-        """
-        wanted = set(keep)
-        missing = sorted(wanted - set(df.columns))
-        if missing:
-            logger.warning("select_columns: column(s) not found, skipped: %s", missing)
-
-        kept = [col for col in df.columns if col in wanted]
-        if not kept:
-            raise ValueError(f"None of the columns {sorted(wanted)} exist in the data.")
-
-        dropped = [col for col in df.columns if col not in wanted]
-        if dropped:
-            logger.info("select_columns dropped: %s", dropped)
-        return df[kept].copy()

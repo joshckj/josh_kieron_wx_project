@@ -11,9 +11,12 @@ a *cleaned* DataFrame:
      using edges written in the config, so nothing is learned from the data.
   4. Optional dropping of columns (e.g. weak sensors) once the features above
      have been built.
+  5. Column selection: keep only the chosen raw sensors, the columns added
+     above, and the id, timestamp and target columns. It runs last, so a
+     sensor that is not chosen can still feed a feature built earlier.
 
 The names of the columns added by the last ``transform`` call are kept in
-``added_columns`` so a later step can choose which columns to use.
+``added_columns``.
 
 Every step is *stateless*: a row's new values depend only on that row, or on
 earlier rows of the same machine. Nothing is fitted and the target is never
@@ -52,6 +55,11 @@ class FeatureEngineer:
             Use ``None`` if the dataset is a single series.
         timestamp_column: Column that defines the order of readings. If it is
             missing, the existing row order is used.
+        sensor_columns: Raw sensor columns to keep, e.g. ``["temperature",
+            "vibration"]``. When given, every other raw column is dropped at
+            the end (added columns, id, timestamp and target are always kept).
+            Leave empty to keep all columns.
+        target_column: Target column, always kept by the column selection.
     """
 
     def __init__(
@@ -65,6 +73,8 @@ class FeatureEngineer:
         drop_columns: Optional[List[str]] = None,
         id_column: Optional[str] = "machine_id",
         timestamp_column: str = "timestamp",
+        sensor_columns: Optional[List[str]] = None,
+        target_column: Optional[str] = None,
     ) -> None:
         thresholds = dict(thresholds or {})
         rolling_columns = list(rolling_columns or [])
@@ -114,14 +124,17 @@ class FeatureEngineer:
         self.drop_columns = list(drop_columns or [])
         self.id_column = id_column
         self.timestamp_column = timestamp_column
+        self.sensor_columns = list(sensor_columns or [])
+        self.target_column = target_column
         self.added_columns: List[str] = []
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "FeatureEngineer":
         """Create a ``FeatureEngineer`` from the parsed ``config.yaml`` dictionary.
 
-        Thresholds are read from ``features.thresholds`` (shared with the rest
-        of the pipeline); everything else comes from ``feature_engineering``.
+        Thresholds, the sensor list and the target are read from ``features``
+        (shared with the rest of the pipeline); everything else comes from
+        ``feature_engineering``.
 
         Args:
             config: Full configuration dictionary.
@@ -131,6 +144,8 @@ class FeatureEngineer:
         """
         try:
             thresholds = config["features"].get("thresholds", {})
+            sensor_columns = config["features"].get("sensors", [])
+            target_column = config["features"].get("target")
             fe_cfg = config.get("feature_engineering", {})
             id_column = config.get("preprocessing", {}).get("id_column", "machine_id")
             timestamp_column = config.get("data", {}).get(
@@ -151,6 +166,8 @@ class FeatureEngineer:
             drop_columns=fe_cfg.get("drop_columns", []),
             id_column=id_column,
             timestamp_column=timestamp_column,
+            sensor_columns=sensor_columns,
+            target_column=target_column,
         )
 
     # ------------------------------------------------------------------ #
@@ -163,8 +180,9 @@ class FeatureEngineer:
             df: Cleaned DataFrame (output of ``Preprocessor.clean``).
 
         Returns:
-            New DataFrame with the extra columns added and ``drop_columns``
-            removed. The input is not modified and row order is unchanged.
+            New DataFrame with the extra columns added, ``drop_columns``
+            removed, and (if ``sensor_columns`` is set) only the chosen
+            columns kept. The input is not modified and row order is unchanged.
         """
         if df.empty:
             raise ValueError("Input DataFrame is empty; cannot engineer features.")
@@ -180,6 +198,8 @@ class FeatureEngineer:
         out = self._drop_columns(out)
         # Keep only the columns that are new and still present after dropping.
         self.added_columns = [col for col in out.columns if col not in before]
+        if self.sensor_columns:
+            out = self._select_columns(out)
         return out
 
     # ------------------------------------------------------------------ #
@@ -263,6 +283,29 @@ class FeatureEngineer:
                 df[name] = rolled
                 logger.info("Added rolling feature '%s'.", name)
         return df
+
+    def _select_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Keep the chosen sensors, the added columns, and the id/time/target."""
+        missing = [col for col in self.sensor_columns if col not in df.columns]
+        if len(missing) == len(self.sensor_columns):
+            raise ValueError(
+                f"None of the sensor columns {self.sensor_columns} exist. "
+                f"Columns available: {sorted(df.columns)}"
+            )
+        if missing:
+            logger.warning("Sensor column(s) not found, skipped: %s", missing)
+
+        wanted = set(self.sensor_columns) | set(self.added_columns)
+        wanted |= {
+            col
+            for col in (self.id_column, self.timestamp_column, self.target_column)
+            if col is not None
+        }
+        kept = [col for col in df.columns if col in wanted]
+        dropped = [col for col in df.columns if col not in wanted]
+        if dropped:
+            logger.info("Column selection dropped: %s", dropped)
+        return df[kept].copy()
 
     def _drop_columns(self, df: pd.DataFrame) -> pd.DataFrame:
         """Drop ``drop_columns`` (missing ones are skipped with a warning)."""
