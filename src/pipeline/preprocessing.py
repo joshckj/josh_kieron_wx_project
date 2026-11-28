@@ -1,44 +1,36 @@
 """Data preprocessing module for machine sensor readings.
 
-Provides a configurable ``Preprocessor`` class that handles:
-  1. Stateless cleaning (dropping leakage columns, fixing sign-flipped
-     vibration readings, deduplicating, parsing timestamps, and sorting).
-  2. Train/test splitting (stratified or chronological) before any stateful
-     fitting to prevent data leakage.
-  3. Stateful transformations fit strictly on training data (missing-value
-     imputation, optional categorical encoding of ``machine_id``, and scaling)
-     via ``scikit-learn``'s ``ColumnTransformer`` with pandas DataFrame output.
+Provides a configurable ``Preprocessor`` class that handles the *stateless*
+steps that are safe to run before splitting:
+  1. Cleaning (dropping leakage columns, fixing sign-flipped vibration
+     readings, deduplicating, parsing timestamps, and sorting).
+  2. Train/test splitting (stratified or chronological).
+
+Anything that learns from the data (imputation, encoding, scaling) lives in
+``transformation.py`` and is fitted on the training rows only.
 """
 
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
-from sklearn.compose import ColumnTransformer
-from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, RobustScaler, StandardScaler
 
 logger = logging.getLogger(__name__)
 
 _VALID_SPLIT_STRATEGIES = {"stratified", "time"}
-_VALID_IMPUTER_STRATEGIES = {"mean", "median", "most_frequent"}
-_VALID_SCALERS = {"standard", "robust", "none"}
 
 
 class Preprocessor:
-    """Cleans, splits, imputes, encodes, and scales machine sensor data.
+    """Cleans and splits machine sensor data.
 
-    Designed to work cleanly with a downstream ``feature_engineering`` step:
-      ``clean()`` -> ``split()`` -> (optional feature engineering) ->
-      ``fit_transform(X_train)`` / ``transform(X_test)``.
+    Pipeline order: ``clean()`` -> feature engineering -> ``split()`` ->
+    ``Transformation`` (fitted on the training split only).
 
     Args:
         target_column: Name of the target column.
         leakage_columns: Columns to drop during ``clean()`` to prevent leakage.
-        id_column: Machine identifier column (treated as categorical, never
-            scaled as a numeric quantity).
+        id_column: Machine identifier column.
         timestamp_column: Datetime column used for sorting and time-based splits.
         drop_leakage: Whether to drop ``leakage_columns`` in ``clean()``.
         fix_negative_vibration: Whether to convert negative ``vibration``
@@ -47,14 +39,6 @@ class Preprocessor:
         split_strategy: Splitting method (``"stratified"`` or ``"time"``).
         test_size: Fraction of rows reserved for the test set (0 < x < 1).
         random_state: Random seed for reproducible stratified splits.
-        imputer_strategy: ``SimpleImputer`` strategy for numeric columns
-            (``"mean"``, ``"median"``, or ``"most_frequent"``).
-        add_missing_indicator: Whether to append binary missingness indicator
-            columns during imputation.
-        scaler: Scaling method for numeric columns (``"standard"``,
-            ``"robust"``, or ``"none"``).
-        encode_machine_id: If True, one-hot encode ``id_column``; if False,
-            drop ``id_column`` before modeling.
     """
 
     def __init__(
@@ -69,10 +53,6 @@ class Preprocessor:
         split_strategy: str = "stratified",
         test_size: float = 0.2,
         random_state: int = 42,
-        imputer_strategy: str = "median",
-        add_missing_indicator: bool = False,
-        scaler: str = "standard",
-        encode_machine_id: bool = False,
     ) -> None:
         if split_strategy not in _VALID_SPLIT_STRATEGIES:
             raise ValueError(
@@ -82,16 +62,6 @@ class Preprocessor:
         if not 0.0 < test_size < 1.0:
             raise ValueError(
                 f"test_size must be between 0 and 1, got {test_size}."
-            )
-        if imputer_strategy not in _VALID_IMPUTER_STRATEGIES:
-            raise ValueError(
-                f"Invalid imputer_strategy '{imputer_strategy}'. "
-                f"Expected one of {sorted(_VALID_IMPUTER_STRATEGIES)}."
-            )
-        if scaler not in _VALID_SCALERS:
-            raise ValueError(
-                f"Invalid scaler '{scaler}'. "
-                f"Expected one of {sorted(_VALID_SCALERS)}."
             )
 
         self.target_column = target_column
@@ -104,13 +74,6 @@ class Preprocessor:
         self.split_strategy = split_strategy
         self.test_size = test_size
         self.random_state = random_state
-        self.imputer_strategy = imputer_strategy
-        self.add_missing_indicator = add_missing_indicator
-        self.scaler = scaler
-        self.encode_machine_id = encode_machine_id
-
-        self._transformer: Optional[ColumnTransformer] = None
-        self._numeric_features: List[str] = []
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "Preprocessor":
@@ -144,10 +107,6 @@ class Preprocessor:
             split_strategy=split_cfg.get("strategy", "stratified"),
             test_size=float(split_cfg.get("test_size", 0.2)),
             random_state=int(split_cfg.get("random_state", 42)),
-            imputer_strategy=prep_cfg.get("imputer_strategy", "median"),
-            add_missing_indicator=bool(prep_cfg.get("add_missing_indicator", False)),
-            scaler=prep_cfg.get("scaler", "standard"),
-            encode_machine_id=bool(prep_cfg.get("encode_machine_id", False)),
         )
 
     # ------------------------------------------------------------------ #
@@ -249,125 +208,3 @@ class Preprocessor:
             random_state=self.random_state,
         )
         return X_train, X_test, y_train, y_test
-
-    # ------------------------------------------------------------------ #
-    # Stage 3: Stateful Fit & Transform (imputation, encoding, scaling)
-    # ------------------------------------------------------------------ #
-    def _build_scaler(self) -> Any:
-        """Return the configured scikit-learn scaler or 'passthrough'."""
-        if self.scaler == "standard":
-            return StandardScaler()
-        if self.scaler == "robust":
-            return RobustScaler()
-        return "passthrough"
-
-    def _prepare_frame(self, X: pd.DataFrame) -> pd.DataFrame:
-        """Prepare input features by casting id_column to string if encoded."""
-        prepared = X.copy()
-        if self.encode_machine_id and self.id_column in prepared.columns:
-            # Cast integer IDs to string so OneHotEncoder treats them as labels.
-            prepared[self.id_column] = prepared[self.id_column].astype(str)
-        return prepared
-
-    def fit(
-        self, X_train: pd.DataFrame, y_train: Optional[pd.Series] = None
-    ) -> "Preprocessor":
-        """Fit imputation, encoding, and scaling transformers on training data.
-
-        Args:
-            X_train: Training feature DataFrame (after optional feature engineering).
-            y_train: Unused; accepted for scikit-learn API compatibility.
-
-        Returns:
-            Fitted ``Preprocessor`` instance.
-        """
-        if X_train.empty:
-            raise ValueError("X_train is empty; cannot fit Preprocessor.")
-
-        prepared = self._prepare_frame(X_train)
-
-        # Exclude identifier, timestamp, and target columns from numeric scaling.
-        excluded = {self.id_column, self.timestamp_column, self.target_column}
-        self._numeric_features = [
-            col
-            for col in prepared.select_dtypes(include=["number", "bool"]).columns
-            if col not in excluded
-        ]
-        if not self._numeric_features:
-            raise ValueError(
-                "No numeric feature columns found to preprocess in X_train."
-            )
-
-        numeric_pipeline = Pipeline(
-            steps=[
-                (
-                    "imputer",
-                    SimpleImputer(
-                        strategy=self.imputer_strategy,
-                        add_indicator=self.add_missing_indicator,
-                    ),
-                ),
-                ("scaler", self._build_scaler()),
-            ]
-        )
-
-        transformers: List[Tuple[str, Any, List[str]]] = [
-            ("num", numeric_pipeline, self._numeric_features)
-        ]
-
-        if self.encode_machine_id:
-            if self.id_column not in prepared.columns:
-                raise ValueError(
-                    f"encode_machine_id=True, but '{self.id_column}' is missing."
-                )
-            cat_pipeline = Pipeline(
-                steps=[
-                    (
-                        "encoder",
-                        OneHotEncoder(
-                            handle_unknown="ignore", sparse_output=False
-                        ),
-                    )
-                ]
-            )
-            transformers.append(("cat", cat_pipeline, [self.id_column]))
-
-        # remainder="drop" drops raw timestamp (and machine_id when not encoded).
-        self._transformer = ColumnTransformer(
-            transformers=transformers,
-            remainder="drop",
-            verbose_feature_names_out=False,
-        )
-        self._transformer.set_output(transform="pandas")
-        self._transformer.fit(prepared, y_train)
-        return self
-
-    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
-        """Transform a feature DataFrame using the fitted transformers.
-
-        Args:
-            X: Feature DataFrame to transform.
-
-        Returns:
-            Transformed DataFrame with preserved column names.
-        """
-        if self._transformer is None:
-            raise RuntimeError(
-                "Preprocessor must be fitted before calling transform()."
-            )
-        prepared = self._prepare_frame(X)
-        return self._transformer.transform(prepared)
-
-    def fit_transform(
-        self, X_train: pd.DataFrame, y_train: Optional[pd.Series] = None
-    ) -> pd.DataFrame:
-        """Fit on ``X_train`` and return the transformed training DataFrame.
-
-        Args:
-            X_train: Training feature DataFrame.
-            y_train: Unused; accepted for scikit-learn API compatibility.
-
-        Returns:
-            Transformed training DataFrame.
-        """
-        return self.fit(X_train, y_train).transform(X_train)
