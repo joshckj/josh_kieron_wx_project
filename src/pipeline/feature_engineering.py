@@ -7,8 +7,13 @@ a *cleaned* DataFrame:
      models such as Logistic Regression cannot, so these flags help them a lot.
   2. Rolling-window means per machine (e.g. ``temperature_roll5_mean``): the
      average of a sensor over that machine's last N readings.
-  3. Optional dropping of columns (e.g. weak sensors) once the features above
+  3. Fixed-edge bins (e.g. ``temperature_bin``): the bin number of a reading,
+     using edges written in the config, so nothing is learned from the data.
+  4. Optional dropping of columns (e.g. weak sensors) once the features above
      have been built.
+
+The names of the columns added by the last ``transform`` call are kept in
+``added_columns`` so a later step can choose which columns to use.
 
 Every step is *stateless*: a row's new values depend only on that row, or on
 earlier rows of the same machine. Nothing is fitted and the target is never
@@ -20,6 +25,7 @@ Everything is switched on or off, and pointed at different columns, from
 import logging
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -36,6 +42,9 @@ class FeatureEngineer:
         add_rolling_features: Whether to add rolling-window mean columns.
         rolling_columns: Columns to compute rolling means for.
         rolling_windows: Window sizes, in number of readings (e.g. ``[3, 5, 10]``).
+        bin_edges: Mapping of column name to a list of increasing edges, e.g.
+            ``{"temperature": [60, 75, 90]}``. Adds ``<col>_bin`` holding the
+            bin number (0 = below the first edge). Missing readings stay NaN.
         drop_columns: Columns to remove at the very end (after the features
             above are built, so a dropped column can still feed a feature).
         id_column: Entity identifier. Rolling windows are computed separately
@@ -52,6 +61,7 @@ class FeatureEngineer:
         add_rolling_features: bool = False,
         rolling_columns: Optional[List[str]] = None,
         rolling_windows: Optional[List[int]] = None,
+        bin_edges: Optional[Dict[str, List[float]]] = None,
         drop_columns: Optional[List[str]] = None,
         id_column: Optional[str] = "machine_id",
         timestamp_column: str = "timestamp",
@@ -59,6 +69,17 @@ class FeatureEngineer:
         thresholds = dict(thresholds or {})
         rolling_columns = list(rolling_columns or [])
         rolling_windows = list(rolling_windows or [])
+        bin_edges = {col: list(edges) for col, edges in (bin_edges or {}).items()}
+
+        for col, edges in bin_edges.items():
+            numeric = all(
+                isinstance(e, (int, float)) and not isinstance(e, bool) for e in edges
+            )
+            if not edges or not numeric or sorted(set(edges)) != edges:
+                raise ValueError(
+                    f"Bin edges for '{col}' must be a non-empty list of "
+                    f"increasing numbers, got {edges!r}."
+                )
 
         if add_threshold_flags and not thresholds:
             raise ValueError(
@@ -89,9 +110,11 @@ class FeatureEngineer:
         self.add_rolling_features = add_rolling_features
         self.rolling_columns = rolling_columns
         self.rolling_windows = rolling_windows
+        self.bin_edges = bin_edges
         self.drop_columns = list(drop_columns or [])
         self.id_column = id_column
         self.timestamp_column = timestamp_column
+        self.added_columns: List[str] = []
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "FeatureEngineer":
@@ -124,6 +147,7 @@ class FeatureEngineer:
             add_rolling_features=bool(fe_cfg.get("add_rolling_features", False)),
             rolling_columns=fe_cfg.get("rolling_columns", []),
             rolling_windows=fe_cfg.get("rolling_windows", []),
+            bin_edges=fe_cfg.get("binning", {}),
             drop_columns=fe_cfg.get("drop_columns", []),
             id_column=id_column,
             timestamp_column=timestamp_column,
@@ -146,11 +170,17 @@ class FeatureEngineer:
             raise ValueError("Input DataFrame is empty; cannot engineer features.")
 
         out = df.copy()
+        before = set(out.columns)
         if self.add_threshold_flags:
             out = self._add_threshold_flags(out)
+        if self.bin_edges:
+            out = self._add_bins(out)
         if self.add_rolling_features:
             out = self._add_rolling_features(out)
-        return self._drop_columns(out)
+        out = self._drop_columns(out)
+        # Keep only the columns that are new and still present after dropping.
+        self.added_columns = [col for col in out.columns if col not in before]
+        return out
 
     # ------------------------------------------------------------------ #
     # Steps
@@ -170,13 +200,27 @@ class FeatureEngineer:
         self._require_columns(df, list(self.thresholds), "threshold flags")
 
         for col, cutoff in self.thresholds.items():
-            name = f"{col}_over_{cutoff}"
+            # 90.0 is written as 90 so the name stays temperature_over_90.
+            label = int(cutoff) if float(cutoff).is_integer() else cutoff
+            name = f"{col}_over_{label}"
             # A missing reading (NaN) compares as False, so its flag is 0. This
             # is deliberate: the imputed median (~75 C for temperature) would
             # also be below the cut-off. Use preprocessing.add_missing_indicator
             # if you need to know the reading was missing.
             df[name] = (df[col] >= cutoff).astype(int)
             logger.info("Added threshold flag '%s'.", name)
+        return df
+
+    def _add_bins(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Add ``<col>_bin``: the bin number of each reading, from fixed edges."""
+        self._require_columns(df, list(self.bin_edges), "bins")
+
+        for col, edges in self.bin_edges.items():
+            name = f"{col}_bin"
+            # Bin i holds values in [edges[i-1], edges[i]); 0 is below the first edge.
+            binned = pd.Series(np.digitize(df[col], edges), index=df.index, dtype=float)
+            df[name] = binned.where(df[col].notna())  # a missing reading has no bin
+            logger.info("Added bin feature '%s'.", name)
         return df
 
     def _add_rolling_features(self, df: pd.DataFrame) -> pd.DataFrame:
