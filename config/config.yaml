@@ -66,7 +66,49 @@ preprocessing:
     strategy: stratified                     # "stratified" or "time"
     test_size: 0.2                           # fraction reserved for test set
     random_state: 42                         # seed for reproducible stratified splits
+
+# -----------------------------------------------------------------------------
+# feature_engineering: row-level features only (used by feature_engineering.py)
+# -----------------------------------------------------------------------------
+feature_engineering:
+  add_threshold_flags: true                  # temperature_over_90, vibration_over_80
+  add_rolling_features: false                # looks at earlier rows, so off by default
+  rolling_columns: [temperature, vibration]
+  rolling_windows: [3, 5, 10]
+  binning: {}                                # fixed edges, e.g. temperature: [60, 75, 90]
+  drop_columns: []
+
+# -----------------------------------------------------------------------------
+# transformation: fitted on the TRAIN split only (used by transformation.py)
+# -----------------------------------------------------------------------------
+transformation:
   imputer_strategy: median                   # "mean", "median", or "most_frequent"
   add_missing_indicator: false               # add binary missingness indicator columns
-  scaler: standard                           # "standard", "robust", or "none"
+  scaler: standard                           # "standard", "minmax", "robust", or "none"
   encode_machine_id: false                   # true = one-hot encode machine_id; false = drop it
+
+# -----------------------------------------------------------------------------
+# models: shared training settings (used by models/base_model.py)
+# -----------------------------------------------------------------------------
+models:
+  cv_folds: 5
+  scoring: balanced_accuracy                 # target is imbalanced (about 20% positive)
+  random_state: 42
+  tuning:
+    enabled: false
+    method: random                           # "grid" or "random"
+    n_iter: 10                               # random search only
+
+  gradient_boosting:                         # models/gradient_boosting.py
+    params:
+      learning_rate: 0.1
+      max_iter: 200
+      max_depth: 6
+      class_weight: balanced
+    param_grid:
+      learning_rate: [0.03, 0.1, 0.3]
+      max_iter: [100, 200, 400]
+      max_depth: [3, 6, 10]
+
+logging:
+  level: INFO
