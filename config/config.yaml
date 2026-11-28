@@ -99,7 +99,7 @@ models:
     method: random                           # "grid" or "random"
     n_iter: 10                               # random search only
 
-  gradient_boosting:                         # models/model_1.py
+  gradient_boosting:                         # models/gradient_boosting.py
     params:
       learning_rate: 0.1
       max_iter: 200
